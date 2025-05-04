@@ -1,149 +1,121 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import seaborn as sns
 import os
+import sys
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+# ---------------------------- AJUSTE DE CAMINHO ---------------------------- #
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from load_data import carregar_dados
 
 # ---------------------------- CONFIGURAÇÃO DA PÁGINA ---------------------------- #
 st.set_page_config(
-    page_title="Clusters e Comparador de Jogadores - FIFA",
-    page_icon="🧠",
+    page_title="Previsão de Overall - FIFA",
+    page_icon="📈",
     layout="wide"
 )
 
-# ---------------------------- FUNÇÕES AUXILIARES ---------------------------- #
-@st.cache_data
-def load_data(data_dir, years):
-    data = []
-    for y in years:
-        df = pd.read_csv(os.path.join(data_dir, f"CLEAN_FIFA{y}_official_data.csv"))
-        df['Year'] = int(f"20{y}") if y != "17" else 2017
-        data.append(df)
-    return pd.concat(data)
+# ---------------------------- SIDEBAR ---------------------------- #
+st.sidebar.header("⚙️ Configurações")
+anos_disponiveis = list(range(2017, 2024))
+ano = st.sidebar.selectbox("Ano do Dataset", anos_disponiveis)
+rodar_modelo = st.sidebar.button("🔍 Treinar Modelo")
 
-@st.cache_data
-def compute_simple_clusters(df, features, n_clusters=6):
-    df = df.dropna(subset=features).copy()
-    df['Feature_Mean'] = df[features].mean(axis=1)
-
-    if df['Feature_Mean'].nunique() < n_clusters:
-        df['Cluster'] = 0
-    else:
-        df['Cluster'] = pd.qcut(df['Feature_Mean'], q=n_clusters, labels=False, duplicates='drop')
-
-    df['AxisX'] = df['Dribbling']
-    df['AxisY'] = df['Finishing']
-    return df
-
-# ---------------------------- PARÂMETROS E CARREGAMENTO ---------------------------- #
-DATA_DIR = "C:/Users/lucas/OneDrive/Documents/Educação/Asimov_Academy/Criando Aplicativos Web com Streamlit/Projeto Streamlit FIFA/datasets/"
-years = ["17", "18", "19", "20", "22", "23"]
-df_all = load_data(DATA_DIR, years)
-
-# ---------------------------- CLUSTERIZAÇÃO ---------------------------- #
-st.title("🧠 Clusters de Jogadores e Comparador (2017-2023)")
-st.markdown("Agrupamento de jogadores por estilo e atributos físicos/técnicos.")
+# ---------------------------- HEADER ---------------------------- #
+st.title("📈 Previsão de Overall dos Jogadores")
+st.markdown("Esta página utiliza regressão para prever a **nota geral (Overall)** dos jogadores com base em atributos objetivos.")
 st.markdown("---")
 
-st.sidebar.header("🔧 Filtros")
-selected_year = st.sidebar.selectbox("Selecione o Ano para Clusterização", sorted(df_all['Year'].unique(), reverse=True))
+# ---------------------------- CARREGAMENTO DOS DADOS ---------------------------- #
+df = carregar_dados(ano)
 
-# ---------------------------- CLUSTERIZAÇÃO E ANÁLISE ---------------------------- #
-df_year = df_all[df_all['Year'] == selected_year].copy()
+# ---------------------------- FEATURES DISPONÍVEIS ---------------------------- #
+feature_cols = ['age', 'potential']
+extra_cols = []
 
-features = [
-    'Acceleration', 'SprintSpeed', 'Agility', 'Balance', 'Strength',
-    'BallControl', 'Dribbling', 'ShortPassing', 'LongPassing',
-    'Finishing', 'ShotPower', 'Marking', 'StandingTackle', 'SlidingTackle'
-]
+if 'value(£)' in df.columns:
+    feature_cols.append('value(£)')
+    extra_cols.append('value(£)')
+if 'wage(£)' in df.columns:
+    feature_cols.append('wage(£)')
+    extra_cols.append('wage(£)')
+if 'release clause(£)' in df.columns:
+    feature_cols.append('release clause(£)')
+    extra_cols.append('release clause(£)')
 
-df_clustered = compute_simple_clusters(df_year, features)
+target_col = 'overall'
 
-fig = px.scatter(
-    df_clustered, x='AxisX', y='AxisY', color=df_clustered['Cluster'].astype(str),
-    hover_data=['Name', 'Club', 'Position', 'Overall'],
-    title='Agrupamento de Jogadores com Base em Atributos Técnicos',
-    labels={'AxisX': 'Dribbling', 'AxisY': 'Finishing'},
-    color_discrete_sequence=px.colors.qualitative.Set1
-)
+# ---------------------------- VERIFICAÇÃO DE COLUNAS ---------------------------- #
+missing = [col for col in feature_cols + [target_col] if col not in df.columns]
+if missing:
+    st.warning(f"⚠️ As seguintes colunas estão ausentes no dataset de {ano}: {missing}")
+    st.stop()
 
-st.plotly_chart(fig, use_container_width=True)
+# ---------------------------- PREPARAÇÃO DO MODELO ---------------------------- #
+df_model = df.dropna(subset=feature_cols + [target_col]).copy()
 
-# Legenda explicativa dos clusters e tabela dinâmica
-st.markdown("### 📄 Interpretação dos Clusters")
-cluster_summary = df_clustered.groupby('Cluster').agg({
-    'Feature_Mean': 'mean',
-    'Overall': 'mean',
-    'Age': 'mean'
-}).rename(columns={
-    'Feature_Mean': 'Média de Atributos',
-    'Overall': 'Overall Médio',
-    'Age': 'Idade Média'
-}).reset_index()
-st.dataframe(cluster_summary, use_container_width=True)
+st.write(f"📊 Registros disponíveis: `{len(df_model)}`")
+if df_model.empty:
+    st.error("❌ Nenhum registro disponível após a limpeza. Verifique os dados.")
+    st.stop()
 
-# Análises derivadas: promessas, veteranos, craques
-st.markdown("### 🔎 Destaques por Perfil")
-min_overall_young = st.sidebar.slider("Overall mínimo - Jovens Promessas", 60, 85, 70)
-min_overall_old = st.sidebar.slider("Overall mínimo - Veteranos", 60, 90, 70)
-min_overall_star = st.sidebar.slider("Overall mínimo - Craques", 80, 95, 87)
-max_age_young = st.sidebar.slider("Idade máxima - Jovens Promessas", 18, 25, 21)
-min_age_old = st.sidebar.slider("Idade mínima - Veteranos", 30, 40, 33)
+X = df_model[feature_cols]
+y = df_model[target_col]
 
-col1, col2, col3 = st.columns(3)
+# ---------------------------- EXECUÇÃO DO MODELO ---------------------------- #
+if rodar_modelo:
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-with col1:
-    st.markdown("#### 🌱 Jovens Promessas")
-    df_promessas = df_clustered[(df_clustered['Age'] <= max_age_young) & (df_clustered['Overall'] >= min_overall_young)]
-    st.dataframe(df_promessas[['Name', 'Age', 'Overall', 'Potential', 'Club']].sort_values(by='Potential', ascending=False).head(10), use_container_width=True)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
 
-with col2:
-    st.markdown("#### 🧓 Veteranos em Atividade")
-    df_veteranos = df_clustered[(df_clustered['Age'] >= min_age_old) & (df_clustered['Overall'] >= min_overall_old)]
-    st.dataframe(df_veteranos[['Name', 'Age', 'Overall', 'Potential', 'Club']].sort_values(by='Overall', ascending=False).head(10), use_container_width=True)
+    # ---------------------------- AVALIAÇÃO ---------------------------- #
+    mae = mean_absolute_error(y_test, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    r2 = r2_score(y_test, y_pred)
 
-with col3:
-    st.markdown("#### 🌟 Craques do Jogo")
-    df_craques = df_clustered[df_clustered['Overall'] >= min_overall_star]
-    st.dataframe(df_craques[['Name', 'Age', 'Overall', 'Potential', 'Club']].sort_values(by='Overall', ascending=False).head(10), use_container_width=True)
+    st.subheader("📊 Avaliação do Modelo")
+    st.write(f"**MAE**: {mae:.2f}")
+    st.write(f"**RMSE**: {rmse:.2f}")
+    st.write(f"**R² Score**: {r2:.2f}")
 
-# ---------------------------- COMPARADOR DE JOGADORES ---------------------------- #
-st.markdown("---")
-st.subheader("📊 Comparador de Jogadores - Gráfico Radar")
-players = st.sidebar.multiselect("Selecione até 5 Jogadores para Comparação", options=sorted(df_year['Name'].unique()))
+    with st.expander("ℹ️ O que significam essas métricas?"):
+        st.markdown("""
+        - **MAE**: Erro médio absoluto entre overall real e previsto  
+        - **RMSE**: Penaliza erros grandes  
+        - **R²**: Mede a capacidade do modelo em explicar o overall real  
+        """)
 
-if players:
-    compare_df = df_year[df_year['Name'].isin(players)].copy()
-    radar_features = ['Acceleration', 'SprintSpeed', 'Agility', 'Dribbling', 'ShortPassing', 'Finishing', 'Strength']
+    # ---------------------------- PLOT REAL VS PREVISTO ---------------------------- #
+    st.subheader("🎯 Real vs Previsto")
+    fig, ax = plt.subplots()
+    sns.scatterplot(x=y_test, y=y_pred, alpha=0.6, ax=ax)
+    ax.set_xlabel("Overall Real")
+    ax.set_ylabel("Overall Previsto")
+    ax.set_title("Dispersão: Overall Real vs Previsto")
+    st.pyplot(fig)
 
-    def normalize(series):
-        return 100 * (series - series.min()) / (series.max() - series.min())
+    # ---------------------------- IMPORTÂNCIA DAS VARIÁVEIS ---------------------------- #
+    st.subheader("📌 Importância das Variáveis")
+    importances = pd.Series(model.feature_importances_, index=feature_cols).sort_values()
+    fig2, ax2 = plt.subplots()
+    importances.plot(kind="barh", ax=ax2)
+    ax2.set_title("Importância das Features na Previsão de Overall")
+    st.pyplot(fig2)
 
-    radar_df = compare_df[['Name'] + radar_features].copy()
-    for col in radar_features:
-        radar_df[col] = normalize(radar_df[col])
-
-    fig_radar = go.Figure()
-    for i, row in radar_df.iterrows():
-        fig_radar.add_trace(go.Scatterpolar(
-            r=row[radar_features].values,
-            theta=radar_features,
-            fill='toself',
-            name=row['Name']
-        ))
-
-    fig_radar.update_layout(
-        polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100])
-        ),
-        showlegend=True,
-        title="Radar Comparativo dos Atributos Selecionados"
-    )
-
-    st.plotly_chart(fig_radar, use_container_width=True)
-else:
-    st.info("👈 Selecione jogadores na barra lateral para comparar atributos em formato radar.")
+    # ---------------------------- MAIORES ERROS ---------------------------- #
+    st.subheader("⚠️ Maiores Erros")
+    df_result = X_test.copy()
+    df_result["Overall Real"] = y_test
+    df_result["Overall Previsto"] = y_pred
+    df_result["Erro Absoluto"] = abs(y_test - y_pred)
+    st.dataframe(df_result.sort_values(by="Erro Absoluto", ascending=False).head(10), use_container_width=True)
 
 st.markdown("---")
-st.markdown("🖥️ Projeto desenvolvido por Lucas Martins de Oliveira - Clusters e Comparador - FIFA (2017-2023)")
+st.markdown("🖥️ Projeto desenvolvido por Lucas Martins de Oliveira - Previsão de Overall - FIFA")
